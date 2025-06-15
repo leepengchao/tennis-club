@@ -1,0 +1,11 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Data files
+data/rankings.json
+data/tournament_history.json
+
+# Streamlit secrets
+.streamlit/secrets.toml
