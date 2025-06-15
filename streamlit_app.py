@@ -214,4 +214,49 @@ def tournament_page():
                 winners.append(p1)
                 continue
             col1, col2 = st.columns(2)
-            s1 = col1.number
+            s1 = col1.number_input(f"{p1} 赢盘数", 0, FAST4["sets"], key=f"w_{i}")
+            s2 = col2.number_input(f"{p2} 赢盘数", 0, FAST4["sets"], key=f"l_{i}")
+            if s1 == FAST4["sets"]:
+                winners.append(p1)
+            elif s2 == FAST4["sets"]:
+                winners.append(p2)
+
+        if len(winners) == len(current_players) // 2 and st.button("确认本轮结果"):
+            tour["rounds"][str(len(winners))] = winners
+            tour["current"] = winners
+            if len(winners) == 1:
+                ss.step = "finish"
+            st.experimental_rerun()
+
+    # ---------- Step 3: 结束 ----------
+    elif ss.step == "finish":
+        tour = ss.tour
+        champion = tour["current"][0]
+        st.balloons()
+        st.success(f"🏆 冠军：{champion}")
+        st.graphviz_chart(dot_graph(tour))
+        st.write("(此处可调用积分结算函数，略)")
+        if st.button("新比赛"):
+            ss.step, ss.tour = "setup", {}
+            st.experimental_rerun()
+# --------------------------------------------------
+# 5️⃣  侧边栏导航 & 路由   ★★ 必不可少 ★★
+# --------------------------------------------------
+PAGES = {
+    "home":        home_page,
+    "players":     players_page,
+    "tournament":  tournament_page,
+    # 其余 page_rankings / page_history / page_stats / page_rules / settings_page
+}
+
+st.sidebar.header("导航")
+for key, label in [
+    ("home", "主页"),
+    ("players", "选手管理"),
+    ("tournament", "举办比赛"),
+]:
+    if st.sidebar.button(label):
+        ss.page = key
+
+# 默认调用
+PAGES.get(ss.page, home_page)()
