@@ -78,7 +78,7 @@ def create_seeded_bracket(players):
     players_in_first_round = players[num_byes:]
 
     # 标准种子配对
-    matches =
+    matches =[]
     head, tail = 0, len(players_in_first_round) - 1
     while head < tail:
         matches.append((players_in_first_round[head], players_in_first_round[tail]))
