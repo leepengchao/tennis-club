@@ -1,264 +1,367 @@
 import streamlit as st
-import json, os, datetime, math
+import json
+import os
+import datetime
 import pandas as pd
-from io import StringIO
+import math
+from collections import defaultdict
+import itertools
 
-# --------------------------------------------------
-# 0️⃣  Page Config (⚠️ 必须是首个 Streamlit 调用)
-# --------------------------------------------------
-st.set_page_config(
-    page_title="精英网球巡回赛系统 Plus",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+# --- 1. 初始化与配置 ---
+st.set_page_config(page_title="专业网球赛事管理系统", layout="wide", initial_sidebar_state="expanded")
 
-"""
-精英网球巡回赛管理系统 Plus
-=============================
-✓ 赛事全流程   ✓ Fast4 比分录入   ✓ 选手管理   ✓ 积分榜 / 历史 / 统计   ✓ 数据导出
-"""
-
-# --------------------------------------------------
-# 1️⃣  常量与路径
-# --------------------------------------------------
+# --- 2. 图标定义 ---
 ICONS = {
-    "home": "🏟️", "tournament": "🏆", "players": "👥", "rankings": "📊",
-    "history": "📜", "stats": "📈", "rules": "⚖️", "settings": "🔧", "vs": "⚔️",
-}
-DATA_DIR = "data"; os.makedirs(DATA_DIR, exist_ok=True)
-PLAYER_F, RANK_F, HIST_F, SET_F = [os.path.join(DATA_DIR, f) for f in (
-    "players.json", "rankings.json", "history.json", "settings.json")]
-
-DEFAULT = {
-    "fast4": {"sets": 2, "games": 4},
-    "points": {
-        "4" : {"winner":100,"finalist":60,"semifinalist":30},
-        "8" : {"winner":200,"finalist":120,"semifinalist":70,"quarterfinalist":30},
-        "16": {"winner":400,"finalist":240,"semifinalist":140,"quarterfinalist":80,"round_of_16":40},
-        "32": {"winner":800,"finalist":480,"semifinalist":280,"quarterfinalist":160,"round_of_16":80,"round_of_32":40},
-    },
+    "home": "🏟️", "tournament": "🏆", "players": "👥", "history": "📜",
+    "rules": "⚖️", "warning": "⚠️", "info": "ℹ️", "player": "👤",
+    "vs": "⚔️", "save": "💾", "H2H": "📊"
 }
 
-# --------------------------------------------------
-# 2️⃣  JSON I/O
-# --------------------------------------------------
-load_json = lambda p, d: json.load(open(p, "r", encoding="utf-8")) if os.path.exists(p) else d
-save_json = lambda d, p: json.dump(d, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=4)
+# --- 3. 数据文件路径 (类数据库结构) ---
+DATA_DIR = 'data'
+PLAYERS_FILE = os.path.join(DATA_DIR, 'players.json')
+TOURNAMENTS_FILE = os.path.join(DATA_DIR, 'tournaments.json')
+MATCHES_FILE = os.path.join(DATA_DIR, 'matches.json')
+os.makedirs(DATA_DIR, exist_ok=True)
 
-players   = load_json(PLAYER_F, {})          # {name:{age,level}}
-rankings  = load_json(RANK_F,   {})          # {name: points}
-history   = load_json(HIST_F,  [])           # list[dict]
-config    = load_json(SET_F,    DEFAULT)
-FAST4     = config["fast4"]                      # dict
-POINTS    = {int(k): v for k, v in config["points"].items()}
+# --- 4. 数据处理核心函数 ---
+def load_data(filepath, default_value):
+    if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
+        return default_value
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, FileNotFoundError):
+        return default_value
 
-ss = st.session_state
-ss.setdefault("page", "home")
-ss.setdefault("step", "setup")   # setup / play / finish
-ss.setdefault("tour", {})         # 当前赛事数据
+def save_data(data, filepath):
+    with open(filepath, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
 
-# --------------------------------------------------
-# 3️⃣  算法工具
-# --------------------------------------------------
+# --- 5. 状态管理初始化 ---
+def initialize_state():
+    if 'page' not in st.session_state:
+        st.session_state.page = "home"
 
-def next_pow2(n: int) -> int:
-    return 1 if n <= 1 else 2 ** math.ceil(math.log2(n))
+initialize_state()
+
+# --- 6. 核心业务逻辑函数 ---
+
+def get_player_name(player_id, players_data):
+    """根据ID获取选手姓名"""
+    return players_data.get(player_id, {}).get("name", "未知选手")
+
+def get_h2h_stats(player1_id, player2_id, matches_data):
+    """计算两位选手之间的H2H战绩"""
+    p1_wins = 0
+    p2_wins = 0
+    records = []
+    for match in matches_data.values():
+        players = {match["player1_id"], match["player2_id"]}
+        if players == {player1_id, player2_id}:
+            winner_id = match.get("winner_id")
+            if winner_id == player1_id:
+                p1_wins += 1
+            elif winner_id == player2_id:
+                p2_wins += 1
+            records.append(match)
+    return p1_wins, p2_wins, records
+
+def create_round_robin_schedule(player_ids):
+    """为循环赛创建对阵日程"""
+    if len(player_ids) % 2 != 0:
+        player_ids.append(None) # 加入一个虚拟选手以保证偶数
+    
+    schedule = []
+    num_players = len(player_ids)
+    num_rounds = num_players - 1
+    
+    for r in range(num_rounds):
+        round_matches = []
+        for i in range(num_players // 2):
+            p1 = player_ids[i]
+            p2 = player_ids[num_players - 1 - i]
+            if p1 is not None and p2 is not None:
+                round_matches.append(tuple(sorted((p1, p2))))
+        schedule.append(round_matches)
+        
+        # 轮换选手
+        player_ids.insert(1, player_ids.pop())
+        
+    return list(itertools.chain.from_iterable(schedule))
+
+def create_single_elimination_bracket(player_ids):
+    """为单败淘汰赛创建对阵"""
+    num_players = len(player_ids)
+    bracket_size = 1 if num_players == 0 else 2**math.ceil(math.log2(num_players))
+    num_byes = bracket_size - num_players
+    
+    byes = player_ids[:num_byes]
+    players_in_first_round = player_ids[num_byes:]
+    
+    matches = []
+    head, tail = 0, len(players_in_first_round) - 1
+    while head < tail:
+        matches.append(tuple(sorted((players_in_first_round[head], players_in_first_round[tail]))))
+        head += 1
+        tail -= 1
+        
+    return matches, byes
+
+# --- 7. 页面渲染函数 ---
+
+def page_home():
+    st.title(f"{ICONS['home']} 专业网球赛事管理系统")
+    st.markdown("### 欢迎使用全新升级的赛事管理系统！")
+    st.info(f"""
+    本系统现已支持多种赛制，并提供详细的选手数据统计功能。
+    - **{ICONS['tournament']} 举办新比赛**: 创建并管理 **单败淘汰赛** 或 **循环赛**。
+    - **{ICONS['players']} 选手数据库**: 查看所有选手资料、参赛历史和 **H2H (历史交手)** 记录。
+    - **{ICONS['history']} 赛事档案馆**: 回顾所有已结束的赛事详情和完整对阵。
+    """)
+    
+    players = load_data(PLAYERS_FILE, {})
+    tournaments = load_data(TOURNAMENTS_FILE, {})
+    col1, col2 = st.columns(2)
+    col1.metric("注册选手总数", len(players))
+    col2.metric("已举办赛事总数", len(tournaments))
 
 
-def build_bracket(seed_list):
-    size = next_pow2(len(seed_list))
-    byes = seed_list[: size - len(seed_list)]
-    rest = seed_list[len(byes):]
-    matches = [(rest[i], rest[~i]) for i in range(len(rest) // 2)]
-    return matches, byes, size
+def page_player_database():
+    st.title(f"{ICONS['players']} 选手数据库与分析")
+    players = load_data(PLAYERS_FILE, {})
+    matches = load_data(MATCHES_FILE, {})
+    tournaments = load_data(TOURNAMENTS_FILE, {})
 
+    if not players:
+        st.warning("尚未注册任何选手。")
+        return
 
-def dot_graph(tour):
-    if not tour:
-        return "digraph G {}"
-    rounds, size = tour["rounds"], tour["size"]
-    champion = rounds.get("1", [None])[0]
-    g = [
-        "digraph G {",
-        "rankdir=LR;",
-        'node [shape=box,style="rounded,filled",fillcolor=lightblue,fontname=sans-serif];',
-        "edge [arrowhead=none];",
-    ]
-    if champion:
-        g.append(f'"C" [label="🏆 {champion}",fillcolor=gold];')
-    cur = size
-    while cur >= 2:
-        players_round = rounds.get(str(cur), [])
-        for j in range(0, len(players_round), 2):
-            p1 = players_round[j]
-            p2 = players_round[j + 1] if j + 1 < len(players_round) else "BYE"
-            nid = f"R{cur}_{j // 2}"
-            g.append(f'"{nid}" [label="{p1} {ICONS["vs"]} {p2}"];')
-            if champion:
-                nxt = cur // 2; target = "C" if nxt == 1 else f"R{nxt}_{(j // 2) // 2}"
-                g.append(f'"{nid}" -> "{target}";')
-        cur //= 2
-    g.append("}")
-    return "\n".join(g)
+    all_player_names = {pid: pdata["name"] for pid, pdata in players.items()}
+    
+    st.sidebar.subheader("选手快速导航")
+    selected_pid = st.sidebar.selectbox("选择查看选手", options=list(all_player_names.keys()), format_func=lambda pid: all_player_names[pid])
 
+    if selected_pid:
+        player_name = get_player_name(selected_pid, players)
+        st.header(f"{ICONS['player']} {player_name} 的个人档案")
 
-def outcome_and_points(draw_size, player, rounds):
-    ladder = {
-        1: ("winner", "冠军"), 2: ("finalist", "亚军"), 4: ("semifinalist", "四强"),
-        8: ("quarterfinalist", "八强"), 16: ("round_of_16", "十六强"), 32: ("round_of_32", "三十二强"),
-    }
-    for rs, (key, name) in ladder.items():
-        if player in rounds.get(str(rs), []):
-            pts = POINTS[min(POINTS, key=lambda k: abs(k - draw_size))].get(key, 0)
-            return name, pts
-    return "参与", 0
+        player_matches = [m for m in matches.values() if selected_pid in [m["player1_id"], m["player2_id"]]]
+        wins = sum(1 for m in player_matches if m.get("winner_id") == selected_pid)
+        losses = len(player_matches) - wins
 
-# --------------------------------------------------
-# 4️⃣  结算积分 & 保存历史
-# --------------------------------------------------
+        col1, col2, col3 = st.columns(3)
+        col1.metric("总参赛场次", len(player_matches))
+        col2.metric("总胜场", wins)
+        col3.metric("总负场", losses)
 
-def settle_points(tour):
-    size = tour["size"]
-    rounds = tour["rounds"]
-    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    record = {"time": ts, "name": f"{ts} ({size}签)", "players": []}
+        # H2H 对比分析
+        st.subheader(f"{ICONS['H2H']} 历史交手记录 (H2H)")
+        other_players = {pid: name for pid, name in all_player_names.items() if pid != selected_pid}
+        opponent_pid = st.selectbox("选择对比选手", options=list(other_players.keys()), format_func=lambda pid: other_players[pid], index=None, placeholder="请选择对手...")
 
-    for p in rounds[str(size)]:
-        outcome, pts = outcome_and_points(size, p, rounds)
-        rankings[p] = rankings.get(p, 0) + pts
-        wins = sum(1 for rps in rounds.values() if p in rps and len(rps) < size)
-        record["players"].append({"name": p, "outcome": outcome, "wins": wins, "points": pts})
-    history.append(record)
-    save_json(rankings, RANK_F)
-    save_json(history, HIST_F)
+        if opponent_pid:
+            opponent_name = get_player_name(opponent_pid, players)
+            p1_wins, p2_wins, h2h_records = get_h2h_stats(selected_pid, opponent_pid, matches)
+            
+            st.metric(f"对阵 **{opponent_name}** 总战绩", f"{p1_wins} - {p2_wins}")
+            if h2h_records:
+                h2h_df = pd.DataFrame([{
+                    "赛事": tournaments.get(m["tournament_id"], {}).get("name", "N/A"),
+                    "轮次": m["round_name"],
+                    "胜者": get_player_name(m["winner_id"], players),
+                    "比分": m.get("score", "N/A")
+                } for m in sorted(h2h_records, key=lambda x: tournaments.get(x["tournament_id"], {}).get("date", ""), reverse=True)])
+                st.dataframe(h2h_df, use_container_width=True, hide_index=True)
 
-# --------------------------------------------------
-# 5️⃣  页面函数
-# --------------------------------------------------
-
-## 5.1 主页
-
-def home_page():
-    st.title(f"{ICONS['home']} 精英网球巡回赛 Plus")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("注册选手", len(players))
-    c2.metric("比赛历史", len(history))
-    c3.metric("排行榜人数", len(rankings))
-
-## 5.2 选手管理
-
-def players_page():
-    st.title(f"{ICONS['players']} 选手管理")
-    tab_add, tab_batch, tab_list = st.tabs(["添加", "批量导入", "列表"])
-
-    with tab_add:
-        with st.form("add_player"):
-            name = st.text_input("姓名")
-            age = st.number_input("年龄", 5, 80, 18)
-            level = st.selectbox("水平", ["Rookie", "Challenger", "Pro"])
-            if st.form_submit_button("保存"):
-                if not name or name in players:
-                    st.warning("姓名为空或已存在")
-                else:
-                    players[name] = {"age": int(age), "level": level}
-                    save_json(players, PLAYER_F)
-                    st.success("已添加")
-                    st.experimental_rerun()
-
-    with tab_batch:
-        up = st.file_uploader("CSV name,age,level", type="csv")
-        if up and st.button("导入"):
-            df = pd.read_csv(StringIO(up.getvalue().decode()), header=None)
-            added = 0
-            for _, r in df.iterrows():
-                if r[0] not in players:
-                    players[r[0]] = {"age": int(r[1]), "level": r[2]}
-                    added += 1
-            save_json(players, PLAYER_F)
-            st.success(f"导入 {added} 人")
-            st.experimental_rerun()
-
-    with tab_list:
-        if players:
-            df = pd.DataFrame(players).T.reset_index().rename(columns={"index": "姓名"})
-            st.dataframe(df, use_container_width=True)
-            sel = st.multiselect("删除选手", list(players))
-            if sel and st.button("确认删除"):
-                for n in sel:
-                    players.pop(n, None); rankings.pop(n, None)
-                save_json(players, PLAYER_F); save_json(rankings, RANK_F)
-                st.experimental_rerun()
+        # 完整比赛历史
+        st.subheader("完整比赛历史")
+        if player_matches:
+            history_df = pd.DataFrame([{
+                "日期": tournaments.get(m["tournament_id"], {}).get("date", "N/A"),
+                "赛事": tournaments.get(m["tournament_id"], {}).get("name", "N/A"),
+                "轮次": m["round_name"],
+                "对手": get_player_name(m["player2_id"] if m["player1_id"] == selected_pid else m["player1_id"], players),
+                "结果": "胜利" if m.get("winner_id") == selected_pid else "失利",
+                "比分": m.get("score", "N/A")
+            } for m in sorted(player_matches, key=lambda x: tournaments.get(x["tournament_id"], {}).get("date", ""), reverse=True)])
+            st.dataframe(history_df, use_container_width=True, hide_index=True)
         else:
-            st.info("暂无选手")
+            st.info("该选手暂无比赛记录。")
 
-## 5.3 举办比赛
 
-def tournament_page():
-    st.title(f"{ICONS['tournament']} 举办比赛")
-    if ss.step != "setup" and st.sidebar.button("取消比赛"):
-        ss.step, ss.tour = "setup", {}; st.experimental_rerun()
+def page_tournament_creation():
+    st.title(f"{ICONS['tournament']} 举办一场新比赛")
+    
+    players = load_data(PLAYERS_FILE, {})
+    all_player_names = sorted(players.values(), key=lambda x: x["name"])
+    
+    st.subheader("步骤 1: 注册新选手")
+    new_player_name = st.text_input("输入新选手姓名 (注册后才能参赛)", key="new_player_name")
+    if st.button(f"注册选手 {new_player_name}", disabled=not new_player_name):
+        if new_player_name in [p["name"] for p in players.values()]:
+            st.warning("该选手已存在！")
+        else:
+            new_pid = "p_" + str(int(datetime.datetime.now().timestamp()))
+            players[new_pid] = {"name": new_player_name, "registered_date": datetime.datetime.now().isoformat()}
+            save_data(players, PLAYERS_FILE)
+            st.success(f"选手 {new_player_name} 注册成功！")
+            st.rerun()
 
-    # ----- Step1 ------
-    if ss.step == "setup":
-        seeds_txt = st.text_area("输入选手 (一行一名，按种子)")
-        if st.button("用选手库填充"):
-            seeds_txt = "\n".join(players)
-            st.session_state["tmp_seeds"] = seeds_txt; st.experimental_rerun()
-        seeds = [s.strip() for s in seeds_txt.strip().split("\n") if s.strip()] if seeds_txt else []
-        if st.button("生成对阵", disabled=len(seeds) < 2):
-            m, byes, sz = build_bracket(seeds)
-            ss.tour = {"size": sz, "rounds": {str(sz): seeds}, "current": byes + [p for a in m for p in a]}
-            ss.step = "play"; st.experimental_rerun()
+    st.subheader("步骤 2: 设置比赛信息")
+    with st.form("tournament_form"):
+        tournament_name = st.text_input("比赛名称", f"{datetime.date.today().strftime('%Y-%m')} 挑战赛")
+        tournament_format = st.selectbox("选择赛制", ["单败淘汰赛 (Single Elimination)", "循环赛 (Round Robin)"])
+        
+        participant_names = st.multiselect("选择参赛选手 (种子顺序)", options=[p["name"] for p in all_player_names])
+        
+        submitted = st.form_submit_button("创建比赛并生成对阵", type="primary")
 
-    # ----- Step2 ------
-    elif ss.step == "play":
-        tour = ss.tour; cur = tour["current"]
-        st.subheader(f"{len(cur)} 强")
-        st.graphviz_chart(dot_graph(tour))
-        winners = []
-        for i in range(0, len(cur), 2):
-            p1, p2 = cur[i], cur[i + 1]
-            if p2 == "BYE": winners.append(p1); continue
-            c1, c2 = st.columns(2)
-            win1 = c1.checkbox(f"{p1} 胜", key=f"chk_{i}_1")
-            win2 = c2.checkbox(f"{p2} 胜", key=f"chk_{i}_2")
-            if win1 and not win2: winners.append(p1)
-            elif win2 and not win1: winners.append(p2)
-        if len(winners) == len(cur) // 2 and st.button("确认本轮结果"):
-            tour["rounds"][str(len(winners))] = winners; tour["current"] = winners
-            ss.step = "finish" if len(winners) == 1 else "play"
-            st.experimental_rerun()
+        if submitted:
+            if len(participant_names) < 2:
+                st.error("至少需要2名选手才能创建比赛。")
+            else:
+                tournaments = load_data(TOURNAMENTS_FILE, {})
+                matches_db = load_data(MATCHES_FILE, {})
+                
+                # 按选择顺序获取选手ID
+                participant_ids = [pid for pid, pdata in players.items() if pdata["name"] in participant_names]
+                id_map = {pdata["name"]: pid for pid, pdata in players.items()}
+                sorted_participant_ids = [id_map[name] for name in participant_names]
 
-    # ----- Step3 ------
-    elif ss.step == "finish":
-        tour = ss.tour; champ = tour["current"][0]
-        st.balloons(); st.success(f"冠军 {champ}")
-        st.graphviz_chart(dot_graph(tour))
-        settle_points(tour)
-        st.write("积分已更新，排行榜 & 历史记录可查看")
-        if st.button("新比赛"):
-            ss.step, ss.tour = "setup", {}; st.experimental_rerun()
+                t_id = "t_" + str(int(datetime.datetime.now().timestamp()))
+                
+                new_tournament = {
+                    "name": tournament_name,
+                    "date": datetime.date.today().isoformat(),
+                    "format": tournament_format,
+                    "participants": sorted_participant_ids,
+                    "status": "进行中"
+                }
 
-## 5.4 积分榜
+                if "单败淘汰赛" in tournament_format:
+                    initial_matches, byes = create_single_elimination_bracket(sorted_participant_ids)
+                    new_tournament["byes"] = byes
+                    round_num = len(sorted_participant_ids) - len(byes)
+                    round_name = f"{round_num}强" if round_num > 2 else "决赛"
+                else: # 循环赛
+                    initial_matches = create_round_robin_schedule(sorted_participant_ids)
+                    round_name = "循环赛"
 
-def rankings_page():
-    st.title(f"{ICONS['rankings']} 积分榜")
-    if not rankings:
-        st.info("暂无数据"); return
-    df = pd.Series(rankings).sort_values(ascending=False).reset_index(); df.columns = ["姓名", "积分"]
-    df["排名"] = range(1, len(df) + 1)
-    st.dataframe(df[["排名", "姓名", "积分"]], use_container_width=True)
-    st.download_button("下载 CSV", df.to_csv(index=False).encode(), "rankings.csv")
+                # 创建比赛记录
+                for p1_id, p2_id in initial_matches:
+                    match_id = "m_" + str(len(matches_db) + 1).zfill(6)
+                    matches_db[match_id] = {
+                        "tournament_id": t_id,
+                        "player1_id": p1_id,
+                        "player2_id": p2_id,
+                        "round_name": round_name,
+                        "winner_id": None,
+                        "score": ""
+                    }
+                
+                tournaments[t_id] = new_tournament
+                save_data(tournaments, TOURNAMENTS_FILE)
+                save_data(matches_db, MATCHES_FILE)
 
-## 5.5 历史记录
+                st.session_state.page = "赛事档案馆"
+                st.success("比赛创建成功！正在跳转到赛事管理页面...")
+                st.rerun()
 
-def history_page():
-    st.title(f"{ICONS['history']} 历史记录")
-    if not history:
-        st.info("暂无记录"); return
-    rec = [{**p, "比赛": h["name"], "日期": h["time"]} for h in history for p in h["players"]]
-    df = pd.DataFrame(rec)
-    st.dataframe(df, use_container_width=True)
-    st.download_button("下载 CSV", df.to_csv(index=False).encode(), "history.csv")
+def page_tournament_archive():
+    st.title(f"{ICONS['history']} 赛事档案馆")
+    
+    tournaments = load_data(TOURNAMENTS_FILE, {})
+    matches = load_data(MATCHES_FILE, {})
+    players = load_data(PLAYERS_FILE, {})
+    
+    if not tournaments:
+        st.info("还没有任何赛事记录。")
+        return
 
-## 5
+    # 按状态分类
+    active_tournaments = {tid: t for tid, t in tournaments.items() if t.get("status") == "进行中"}
+    completed_tournaments = {tid: t for tid, t in tournaments.items() if t.get("status") == "已结束"}
+
+    tab1, tab2 = st.tabs(["进行中的赛事", "已结束的赛事"])
+
+    with tab1:
+        if not active_tournaments:
+            st.success("所有赛事均已完成！")
+        else:
+            for t_id, t_data in sorted(active_tournaments.items(), key=lambda item: item[1]['date'], reverse=True):
+                with st.expander(f"**{t_data['name']}** ({t_data['format']}) - {t_data['date']}", expanded=True):
+                    tournament_matches = {mid: m for mid, m in matches.items() if m["tournament_id"] == t_id}
+                    
+                    # 比赛录入区
+                    for m_id, m_data in tournament_matches.items():
+                        if m_data.get("winner_id"): continue # 跳过已完成的比赛
+
+                        p1_name = get_player_name(m_data["player1_id"], players)
+                        p2_name = get_player_name(m_data["player2_id"], players)
+
+                        st.markdown(f"**{p1_name}** {ICONS['vs']} **{p2_name}** ({m_data['round_name']})")
+                        cols = st.columns([2, 1, 1])
+                        score = cols[0].text_input("输入比分", key=f"score_{m_id}", placeholder="例如: 6-4, 6-3")
+                        
+                        if cols[1].button(f"👈 {p1_name} 胜", key=f"win_{m_id}_{p1_name}"):
+                            matches[m_id]["winner_id"] = m_data["player1_id"]
+                            matches[m_id]["score"] = score
+                            save_data(matches, MATCHES_FILE)
+                            st.rerun()
+
+                        if cols[2].button(f"{p2_name} 胜 👉", key=f"win_{m_id}_{p2_name}"):
+                            matches[m_id]["winner_id"] = m_data["player2_id"]
+                            matches[m_id]["score"] = score
+                            save_data(matches, MATCHES_FILE)
+                            st.rerun()
+                        st.divider()
+
+                    # 结束比赛按钮
+                    if all(m.get("winner_id") for m in tournament_matches.values()):
+                        if st.button(f"✅ 完成并归档赛事: {t_data['name']}", type="primary"):
+                            tournaments[t_id]["status"] = "已结束"
+                            save_data(tournaments, TOURNAMENTS_FILE)
+                            st.rerun()
+    with tab2:
+        if not completed_tournaments:
+            st.info("暂无已结束的赛事。")
+        else:
+            for t_id, t_data in sorted(completed_tournaments.items(), key=lambda item: item[1]['date'], reverse=True):
+                 with st.expander(f"**{t_data['name']}** ({t_data['format']}) - {t_data['date']}"):
+                    tournament_matches = [m for m in matches.values() if m["tournament_id"] == t_id]
+                    
+                    df_data = [{
+                        "轮次": m["round_name"],
+                        "选手1": get_player_name(m["player1_id"], players),
+                        "选手2": get_player_name(m["player2_id"], players),
+                        "比分": m.get("score", "N/A"),
+                        "胜者": get_player_name(m.get("winner_id"), players)
+                    } for m in tournament_matches]
+                    
+                    st.dataframe(pd.DataFrame(df_data), use_container_width=True, hide_index=True)
+
+
+# --- 8. 主导航与页面渲染 ---
+st.sidebar.title("导航")
+PAGES_CONFIG = {
+    "home": "系统主页",
+    "tournament_creation": "举办新比赛",
+    "players": "选手数据库",
+    "history": "赛事档案馆"
+}
+PAGES_RENDER = {
+    "home": page_home,
+    "tournament_creation": page_tournament_creation,
+    "players": page_player_database,
+    "history": page_tournament_archive
+}
+
+for page_key, page_name in PAGES_CONFIG.items():
+    if st.sidebar.button(f"{ICONS[page_key]} {page_name}", use_container_width=True):
+        st.session_state.page = page_key
+        st.rerun()
+
+# 渲染当前页面
+page_to_render = st.session_state.get("page", "home")
+PAGES_RENDER[page_to_render]()
